@@ -1,0 +1,3048 @@
+---
+title: "trade-offs_meta-analysis_2026.Rmd"
+author: "maciejB"
+date: "2026-09-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This analysis is related to the study:
+
+"Growth–reproduction trade-offs are common but changing in woody plants: a meta-analysis" 
+Barczyk et al. 2026
+
+Summary
+Growth and reproduction draw on a common resource pool, yet empirical studies of woody plants report widely differing relationships between seed production and growth. Here we synthesize 685 estimates from 78 studies covering 79 woody species, with study locations concentrated at northern temperate latitudes, to test how growth–reproduction correlations vary across time, species, and environments. Growth and reproduction measured within the same year were negatively correlated, suggesting an immediate cost of reproduction. The strength and direction of growth–reproduction correlations showed at most weak phylogenetic structure among the sampled species and were not systematically related to functional traits and climate. Instead, trade-offs were strongest in species with high interannual variability in seed production and weakened markedly over recent decades in these species. Together, these results show that growth–reproduction trade-offs in woody plants are common but not fixed, and that shifts in reproductive variability under environmental change can alter how trees balance growth and reproduction, with consequences for long-term forest functioning.
+
+
+```{r setup, include=FALSE}
+ 
+usethis::git_sitrep()
+usethis::use_git()
+
+```
+
+```{r packages}
+
+library(here)
+library(metafor)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(DT)
+library(meta)
+library(lme4)
+library(lmerTest)
+library(mgcv)
+library(hrbrthemes)
+library(tidyr)
+library(viridis)
+library(RColorBrewer)
+library(gplots)
+library(rmarkdown)
+library(knitr)
+library(ape)
+library(phytools); library(readxl); library(readr) ;library(ggtree);
+library(patchwork); library(ggeffects); library(ggthemes)
+library(glmmTMB); library(emmeans) ; library(reshape2)
+library(rnaturalearth); library(sf) ; library(splines)
+library(geosphere); library(ncf); library(raster)
+library(wesanderson)
+ 
+#install.packages("pacman")
+pacman::p_load(devtools,R.rsp)
+
+#devtools::install_github("daniel1noble/orchaRd", force = TRUE)
+library(orchaRd)
+
+# devtools::install_github("jinyizju/V.PhyloMaker2")
+library(V.PhyloMaker2)
+
+#devtools::install_github("thomasp85/patchwork")
+library(patchwork)
+
+### install package with whittaker plot from github
+# devtools::install_github("valentinitnelav/plotbiomes") 
+library(plotbiomes)
+
+```
+
+```{r data loading, echo=FALSE}
+
+here()
+ 
+### read the final meta-analysis data frame
+meta <- readxl::read_xlsx(here("DATA_files","trade-offs_meta-analysis-data.xlsx")) %>% filter(decision != "NA")
+str(meta)
+
+## prepare the data frame converting variables to a proper format
+meta <- meta %>%
+  mutate(across(c(longitude, latitude, number_of_trees, number_of_years, `sample_size_ifY=1`), as.numeric),
+         totalN = number_of_trees*number_of_years,
+         tip_label = str_replace(species,' ','_'),
+        plant_type = str_to_title(plant_type))
+         
+## count full number of studies
+meta   %>%  group_by(title) %>% tally()
+
+# 146 studies included after abstract screening
+
+## prepare the final data frame with only valid observations
+meta_INC <-  meta %>%
+  filter(decision == "INCLUDE" & Z != "NA")
+
+str(meta_INC)      
+
+## count n of observations by title and population_id
+meta_INC %>%  group_by(title) %>% tally() 
+meta_INC %>%  group_by(pop_id) %>% tally() 
+
+## count number of studies with correlations restricted to the same year
+meta_INC %>%
+  filter(H1 =="zero") %>%   group_by(title) %>% tally() 
+
+meta_INC %>%
+  filter(H1 =="zero") %>%     group_by(pop_id) %>% tally() 
+
+# 738 effect sizes
+# 78 studies
+# 79 species (tip_label)
+# 308 populations
+# 38 genera
+
+meta   %>%  filter(Rayyan =="present") %>%  group_by(title) %>% tally() 
+meta_INC %>% filter(Rayyan =="present") %>%  group_by(title) %>% tally() 
+
+# 48 eligible studies found by Rayyan (from 110 studies identified)
+
+## count records with extra information
+meta %>%
+  filter(decision == "extra information") 
+meta_INC %>% filter(H1 == "NA")
+# 51 effect sizes with extra lags and 19 effect sizes with extra information = 70
+
+```
+
+PHYLOGENY 
+the leading phylogeny in the analysis is the phylogeny from Zanne et al. 2014
+the phylogeny from the open tree of life (synthetic tree lacking the divergence time of clades) 
+but up to date list of species will be used in the supplement for the sensitivity analysis
+
+construct the phylogenetic tree for species in the meta-analysis
+
+```{r}
+ 
+### summarizes all species names from meta-analysis
+meta %>% 
+group_by(species) %>%
+summarize(tip_label = unique(tip_label)) 
+
+### summarizes species names from meta-analysis (final data with taxa names)
+my_taxa <- meta_INC  %>% 
+group_by(tip_label) %>% 
+summarize(tip_label = unique(tip_label)) 
+
+### upload phylogenetic tree (Zanne et al.2016) and change 0 to minimal values
+
+phylogenetictree  <-  ape::read.tree(file=here("DATA_files","Vascular_Plants_rooted.dated.tre")) 
+phylogenetictree$edge.length[which(phylogenetictree$edge.length == 0)] = 1e-10
+
+### compare misssing species from the final set of species compared to the uploaded phylogenetic tree
+setdiff(my_taxa$tip_label, phylogenetictree$tip.label)
+  
+## find similar names from rotl package
+### adds missing taxa
+
+miss_taxa <- c("Larix_principis-rupprechtii" ,"Liquidambar_styracifula", "Ocotea_tenera"  , "Quercus_coccinea" , "Quercus_douglasii", "Quercus_liaotungensis","Quercus_phellos",  "Quercus_prinus" ,  "Rhamnus_alpinus")
+
+### compare missing names with the names used in Open Tree of Life (rotl)
+my_taxa_names <- as.character(my_taxa$tip_label)
+
+resolved_names <- rotl::tnrs_match_names(names = miss_taxa, context_name = "All life")
+class(resolved_names)
+resolved_names$unique_name
+
+```
+## see all Quercus species present in the tree
+
+all_quercus_tips <- grep(
+  "^Quercus[ _]",
+  phylogenetictree$tip.label,
+  value = TRUE
+)
+
+all_quercus_tree <- ape::keep.tip(
+  phylogenetictree,
+  tip = all_quercus_tips
+)
+
+ggtree(all_quercus_tree) +
+  geom_tiplab(fontface = "italic") +
+  geom_treescale()
+ 
+
+
+```{r  changing names to keep the phylogenetic tree updated}
+
+## new names to adjust to the phylogenetic tree (synonyms found in the internet or rotl)
+
+newNames <- tibble(
+  old = c("Larix_principis-rupprechtii", "Quercus_liaotungensis", "Rhamnus_alpinus", "Quercus_prinus", "Liquidambar_styracifula"),
+  new = c("Larix_gmelinii", "Quercus_mongolica", "Rhamnus_alpina","Quercus_montana","Liquidambar_styraciflua")
+)
+
+## replacing names across data frames
+
+my_taxa <- my_taxa %>%
+  left_join(newNames, by = c("tip_label" = "old")) %>%
+  mutate(tip_label = coalesce(new, tip_label)) %>%
+  dplyr::select(-new)
+  
+## replacing original names with the names in phylogenetic tree
+meta <- meta %>%
+  left_join(newNames, by = c("tip_label" = "old")) %>%
+  mutate(tip_label = coalesce(new, tip_label)) %>%
+dplyr::select(-new)
+  
+  meta_INC <- meta_INC %>%
+  left_join(newNames, by = c("tip_label" = "old")) %>%
+  mutate(tip_label = coalesce(new, tip_label)) %>%
+dplyr::select(-new)
+  
+### compare species from two data sets again (the corrected species list and available phylogenetic tree)
+setdiff(my_taxa$tip_label, phylogenetictree$tip.label)
+
+phylolabel <- phylogenetictree$tip.label
+
+######## adding missing species to the phylogenetic tree
+
+# Ocotea tenera 
+
+## Ocotea oblonga is the closest relative present in the tree according to Penagos et al. 2020 
+ 
+new_phylo_updated1 <- phytools::bind.tip(
+  phylogenetictree,
+  tip.label = "Ocotea_tenera",
+  where = which(phylogenetictree$tip.label == "Ocotea_oblonga"),
+  position = 1.9,
+  edge.length = 1.9
+)
+
+## plot tree for Ocotea genus to see the edits
+
+tree_oc <- ape::keep.tip(
+  new_phylo_updated1,
+  tip = grep(
+  "^Ocotea[ _]",
+  new_phylo_updated1$tip.label,
+  value = TRUE
+) )
+
+ggtree(tree_oc, layout = "fan") +
+  geom_tiplab(fontface = "italic") +
+  geom_treescale()
+ 
+
+# Quercus phylogeny according to Zhou et al. 2022 (NatCom) and Althaus et al. 2026 (PNAS)
+
+### Quercus douglasii
+
+new_phylo_updated2 <- bind.tip(new_phylo_updated1,
+                tip.label   = "Quercus_douglasii",
+                where       = which(phylogenetictree$tip.label == "Quercus_lobata"),  # attach at that node
+                position    = 0.01,          # 0 => attach at the node (polytomy)
+                edge.length = 0.01)       # choose a branch length (units match your tree)
+
+
+### Quercus coccinea (section Lobatae)
+
+new_phylo_updated3 <- phytools::bind.tip(
+  new_phylo_updated2,
+  tip.label = "Quercus_coccinea",
+  where = which(phylogenetictree$tip.label == "Quercus_velutina"),
+  position = 0.01,
+  edge.length = 0.01
+)
+
+### Quercus phellos
+
+new_phylo_updated    <- bind.tip(new_phylo_updated3,
+                tip.label   = "Quercus_phellos",
+                where       =  which(phylogenetictree$tip.label == "Quercus_laurifolia"),  
+                position    = 0.3,          # 0 => attach at the node (polytomy)
+                edge.length = 0.3)       # choose a branch length (units match your tree)
+                
+
+### ####
+####
+###
+## plot tree for Quercus genus to see the edits
+
+tree_quercus <- ape::keep.tip(
+  new_phylo_updated,
+  tip = grep(
+"^Quercus[ _]",
+  new_phylo_updated$tip.label,
+  value = TRUE
+) )
+ 
+ 
+ggtree(tree_quercus, layout = "fan", as.Date = TRUE, yscale_mapping = FALSE, hang = 0.1) +
+  geom_tiplab(fontface = "italic") +
+  geom_treescale()
+                
+############################################################################
+### save the update phylogenetic tree
+                        
+write.tree(new_phylo_updated, file = "phylogenetic_tree_meta-updated.newick")
+
+### subset tree withs species present in the data (original file and missing names)
+subtree0  <-  drop.tip(phylogenetictree, setdiff(phylogenetictree$tip.label, meta_INC$tip_label))
+
+subtree  <-  drop.tip(new_phylo_updated, setdiff(new_phylo_updated$tip.label, my_taxa$tip_label))
+
+plot(subtree0)
+
+# Plot the tree, and add the time axis
+ape::plot.phylo(subtree, cex = 1) 
+#ape::axisPhylo()
+
+## plot the ciruclar tree
+
+ggtree(subtree,layout = "fan", open.angle = 0) +
+  geom_tiplab(fontface = "italic") +
+  geom_treescale() + theme_tree2()
+
+ggtree(subtree0,layout = "fan") +
+  geom_tiplab(fontface = "italic") 
+
+## IMPORTANT STEP FOR FURTHER ANALYSIS
+## creates correlation matrix of phylogenetic relatedness 
+
+phylo_corMatrix <- vcv(subtree, cor = T)
+
+```
+
+
+
+
+
+```{r construction of phylogenetic tree from open tree of life}
+
+## get names from open tree of life
+rotl::tol_about()
+
+resolved_names <- rotl::tnrs_match_names(names = my_taxa$tip_label, context_name = "All life")
+
+my_tree <- rotl::tol_induced_subtree(ott_ids = resolved_names$ott_id, label_format = "name")
+  
+##
+is.binary(my_tree) # Check if tree is binary 
+set.seed(1) # Set a seed to resolve politomies at random, and obtain similar results
+binary.tree <- multi2di(my_tree, random=T) #resolve polytomies at random
+
+my_phylo_branched <- compute.brlen(binary.tree, method = "Grafen", power = 1) # compute branch lengths using Grafen's method
+
+### change names to adjust to my data
+
+setdiff(my_taxa$tip_label, my_phylo_branched$tip.label)
+
+my_phylo_branched$tip.label 
+
+# change names to adjust data
+# Oreoherzogia replace with Rhamnus
+my_phylo_branched$tip.label  <- gsub("Oreoherzogia_alpina", "Rhamnus_alpina", my_phylo_branched$tip.label)
+
+# Fuscospora replace with Nothofagus
+my_phylo_branched$tip.label <- gsub("Fuscospora_truncata", "Nothofagus_truncata", my_phylo_branched$tip.label)  
+
+# edit strange appendix but check its position first ()
+my_phylo_branched$tip.label[55]
+my_phylo_branched$tip.label[55] <- "Dacrydium_cupressinum" 
+
+
+### checking names (the difference should equal 0 to match with studied taxa)
+setdiff(my_taxa$tip_label, my_phylo_branched$tip.label)
+
+### # Generate variance covariance matrix based on a Brownian model of evolution
+# to obtain species relatedness (TOL)
+
+phylo_matrix <- vcv(my_phylo_branched,cor=T) 
+
+plot(my_phylo_branched)
+# ape::axisPhylo()
+
+```
+
+META-ANALYSIS 
+variance calculations
+
+```{r calculating variance and weights}
+
+####### use the proper sample size for all records with number of years < 4 
+meta_INC$sample_size = coalesce(meta_INC$`sample_size_ifY=1`,meta_INC$number_of_years)
+
+### calculate standard errors and weights (weight is equivalent to 1/var_z)
+
+meta_INC$var_z <- 1/(meta_INC$sample_size - 3)
+meta_INC$weight <- (meta_INC$sample_size - 3)
+
+### remove data with too low or to good sample size
+
+meta_INC <- meta_INC %>%
+filter(var_z > 0 & var_z != "Inf")
+
+## subset of data using only current year observations
+
+meta_1y <- meta_INC %>%
+  filter(H1 == "zero")
+
+### mean Z score across all species
+
+meta_Z <- meta_1y %>%
+group_by(tip_label) %>%
+summarize(meanZ = mean(Z,na.rm=T),
+          pop = n_distinct(pop_id),
+          sumY = sum(number_of_years),
+          meanY = round(num(mean(number_of_years)),digits=0 )
+             )
+
+meta_Z_sec <- meta_1y %>%
+filter(growth_type == "secondary growth") %>%
+group_by(tip_label) %>%
+summarize(meanZ = mean(Z,na.rm=T),
+          pop = n_distinct(pop_id),
+          sumY = sum(number_of_years),
+          meanY = round(num(mean(number_of_years)),digits=0 )
+             )
+
+### histogram of Z score for entire data frame and subset of current year
+hist1 <- hist(meta_INC$Z, breaks = 20, col = "grey")
+
+hist(meta_1y$Z, breaks = 20, col = "darkgreen")
+
+hist(meta_INC$Z, breaks = 30, col = "darkgreen") +  geom_vline(xintercept = 0, linetype="dashed")+ 
+ theme_bw()
+ 
+```
+ 
+ 
+ 
+```{r hypothesis one - using all data and time lags}
+ 
+## null model with all time effects (correlations for all recorded time lags - the Z effect should be nonsignificant)
+
+model0  <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ 1 ,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_INC)
+
+summary(model0)
+
+### model H1 - hypothesis ONE - with time lags restricted only to growth from current or +/- year
+
+### filtering datasets to lags that don't exceed one year
+
+meta_H1 <- meta_INC %>%
+filter(!H1 == "NA")
+
+meta_H1 %>%  group_by(title) %>% tally() 
+
+meta_H1 %>%  group_by(pop_id) %>% tally() 
+ 
+### all relevant effect sizes for the analysis
+
+# 685 effect sizes
+# 78 studies
+# 79 species (tip_label)
+# 191 populations
+# 306 populations
+# 38 genera
+
+
+## adjusting names to be self-explanatory 
+
+H1names <- tibble(old = c("zero","plus1","minus1"),
+  new = c( "Unlagged effect (t)","Lagged effect (t + 1)", "Lagged effect (t - 1)")
+  )
+
+meta_H1 <- meta_H1 %>%
+  left_join(H1names, by = c("H1" = "old")) %>%
+  mutate(H1 = coalesce(new, H1)) %>%
+  dplyr::select(-new)
+ 
+
+meta_H1 <- meta_H1 %>%
+  mutate(H1=factor(H1)) %>% 
+  mutate(H1=fct_relevel(H1,c("Lagged effect (t + 1)","Unlagged effect (t)","Lagged effect (t - 1)"))) %>%
+ arrange(H1)
+ 
+ 
+### rma model including conservative phylogenetic relatedness only (NULL MODEL with phylo_corMatrix)
+### model H1 - the negative correlations should prevail, but are dispersed across data
+
+model_H1_null <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ 1,
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_H1)
+
+summary(model_H1_null)
+
+## check study heterogeneity and R2 of the model
+i2_ml(model_H1_null)
+r2_ml(model_H1_null) 
+
+### rma model testing first hypothesis with time lags (H1 as a categorical variable in mods) with the conservative phylogenetic relatedness included
+
+model_H1 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ H1 - 1 ,
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_H1)
+
+summary(model_H1)
+coef(summary(model_H1))
+model_H1
+## check study heterogeneity and R2 of the model
+i2_ml(model_H1) 
+r2_ml(model_H1) 
+
+## calculate percentage of variance explained by random effects
+0.0149/ (0.0149+0.0264)
+0.0264/ (0.0149+0.0264)
+ 
+model_H1$sigma2
+
+### intercept at 0
+### variance explained by study_id and effect_size_id, but not by phylogeny
+### trade-off is present only in current year (highly significant) but T-1 and T+1 are not different from 0
+### correlations at T-1 and T+1 are not different from 0
+
+## a complementary model without phylogenetic relatedness (only species effect of tip_label)
+
+model_H1_noCor <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ H1 - 1 ,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_H1)
+
+summary(model_H1_noCor)
+
+
+### intercept at 0
+### variance explained by study_id and effect_size_id, but not by phylogeny
+### trade-offs are present in current year and positive correlations are present in T-1 (highly significant)
+### correlations at T+1 are not different from 0
+
+### rma model including  phylogenetic relatedness only (MODEL with rotl phylo_matrix )
+
+modelH1_rotl <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ H1 - 1,
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_H1)
+
+summary(modelH1_rotl)
+
+## check study heterogeneity and R2 of the model
+i2_ml(modelH1_rotl) 
+r2_ml(modelH1_rotl) 
+
+## calculate percentage of variance explained by random effects
+0.0080/ (0.0080+0.0255)
+0.0255/ (0.0080+0.0255)
+ 
+### intercept at 0
+### variance explained by study_id and effect_size_id, but not by phylogeny
+### trade-offs are present in current year and positive correlations are present in T-1 (highly significant)
+### correlations at T+1 are not different from 0
+
+#extraction of marginal estimates for time lag type from the model:
+
+res_colour_type <- orchaRd::mod_results(modelH1, mod = "H1",  group = "title") 
+res_colour_type
+ 
+### comparison of AIC of the models - all models are valid
+AIC(modelH1_null,modelH1,modelH1_noCor,modelH1_corM)
+
+```
+
+
+### plot the results from the model H1 with categorical variable of time lags (rma model with phylogeny)
+### orchard plot (ggplot-linked package to plot results of meta-analyses) 
+ 
+```{r figure2}
+## set my theme for figures
+
+my_theme = theme_set(theme_minimal(base_size = 20))  # set your base text size here (e.g., 11–14)
+
+my_theme = theme_update(
+  plot.title      = element_text(face = "bold", hjust = 0, margin = margin(b = 6),size = 22),
+  plot.subtitle   = element_text(margin = margin(b = 6)),
+  axis.title      = element_text(),
+  axis.text       = element_text(),
+  legend.title    = element_text(),
+  legend.text     = element_text(),
+  strip.text      = element_text(face = "bold"),
+  plot.margin     = margin(8, 8, 8, 8)    # extra breathing room so titles never get clipped
+)
+
+## plot the results
+plot2b <- orchard_plot(model_H1 , mod = "H1", group = "title", xlab = "Effect size (Z-score)", transfm = "none", alpha = 0.3,
+                       angle = 0,   fill = T, trunk.size = 0.6, twig.size = 0.4,  branch.size = 2, legend.pos = "top.out",  
+                       condition.lab = NULL , flip = TRUE, g = FALSE, k=TRUE ) +
+theme(legend.direction = "horizontal")   +
+scale_colour_manual(values=c("darkblue","darkgreen","darkorange3")) +
+scale_fill_manual(values=c("deepskyblue","chartreuse3","darkorange"))   + labs(title = "B") +   
+theme(axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+      plot.title = element_text(size=25) )   
+     
+plot2b
+ 
+ggsave("DATA_files/plots/H1plot.pdf", height = 9, width = 10,  bg="transparent")
+    
+### plot the legend
+
+plot2b_leg <- orchard_plot(model_H1 , mod = "H1", group = "title", xlab = "Effect size (Z-score)", transfm = "none", alpha = 0.3,
+                       angle = 0,   fill = T, trunk.size = 0.8, twig.size = 0.4,  branch.size = 2, legend.pos = "top.out",
+                       condition.lab = NULL , flip = TRUE, g = FALSE, k=TRUE ) +theme_minimal(base_size = 24) +
+theme(legend.direction = "horizontal")  
+  
+leg_2b <- ggpubr::get_legend(plot2b_leg)
+ 
+ggsave("DATA_files/plots/legend_plotH1.pdf", height = 9, width = 10,  bg="transparent")
+ggsave("plots/legend_plotH1.pdf", height = 9, width = 10,  bg="transparent")
+    
+
+ 
+## plot the results including all effect sizes with caterpillar plot (forest plot from orchard2.0)
+
+resultsmodelH1 <- orchaRd::mod_results(model_H1, mod = "1", at = NULL,  group = "title")
+ 
+orchaRd::caterpillars(resultsmodelH1, mod="1", xlab = "Standardised mean difference") 
+
+## plot with results from the alternative model with rotl phylogeny
+
+plot2b_SUP <- orchard_plot(modelH1_rotl , mod = "H1", group = "title", xlab = "Effect size (Z-score)", transfm = "none", alpha = 0.3,
+                       angle = 0,   fill = T, trunk.size = 0.6, twig.size = 0.4,  branch.size = 2, legend.pos = "top.out",  
+                       condition.lab = NULL , flip = TRUE, g = FALSE, k=TRUE ) +
+theme(legend.direction = "horizontal")   +
+scale_colour_manual(values=c("darkblue","darkgreen","darkorange3")) +
+scale_fill_manual(values=c("deepskyblue","chartreuse3","darkorange"))   + # labs(title = "simplified phylogeny (tree of life)") + 
+theme(plot.title = element_text(size=20), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+       )   
+ 
+ plot2b_SUP
+
+```
+
+```{r distribution of correlations according to time lag}
+
+### all data filtered to H1 
+
+meta_INC %>%
+# filter(H1 != "NA") %>%
+  ggplot(aes(x=Z, color= H1, fill= H1)) +
+    geom_density(alpha=0.4 ) +
+    scale_fill_viridis(discrete=TRUE) +
+    scale_color_viridis(discrete=TRUE)  +
+   geom_vline(xintercept = 0, linetype="dashed") +
+theme_bw()+ # theme_ipsum() +
+    theme(
+      legend.position="right") +
+    ylab("Density") +
+    xlab("Distribution of Z score")
+
+
+### all data filtered to H1 
+
+meta_INC %>%
+filter(H1 != "NA") %>%
+  ggplot(aes(x=Z, color= time_effect, fill= time_effect)) +
+    geom_density(alpha=0.4 ) +
+    scale_fill_viridis(discrete=TRUE) +
+    scale_color_viridis(discrete=TRUE)  +
+   geom_vline(xintercept = 0, linetype="dashed") +
+theme_bw()+ # theme_ipsum() +
+    theme(
+      legend.position="right") +
+    ylab("Density") +
+    xlab("Distribution of Z score")
+
+
+```    
+     
+
+
+
+```{r histogram of effect sizes on relevant filtered data - only current year}
+
+
+
+### calculate average by species, study and location 
+
+mean_res <- meta_INC %>%
+  group_by(authors, species, location) %>%
+  summarize(Z = (sum(weight * Z)/sum(weight)),
+            var = 1/sum(weight))
+
+## histogram of Z values across all observations
+hist(mean_res$Z, breaks = 20, col = "darkgreen")
+
+### secondary growth prevails
+
+### mean per species per study
+mean_sp_res <- meta_INC %>%
+  group_by(title, tip_label) %>%
+  filter(H1=="zero") %>%
+  summarize(Z = (sum(weight * Z)/sum(weight)),
+            var_z = 1/sum(weight))
+
+model_sp_res <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  1,
+                       random = list(~1|tip_label,
+                                      ~1|title),
+                        R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = mean_sp_res)
+
+resultsmodel_sp_res <- orchaRd::mod_results(model_sp_res, mod = "1", at = NULL,  group = "title")
+ 
+orchaRd::caterpillars(resultsmodel_sp_res, mod="1", xlab = "Standardised mean difference") 
+
+### mean per species only
+
+mean_species <- meta_INC %>%
+ group_by(tip_label) %>%
+  filter(H1=="zero") %>%
+  summarize(Z = (sum(weight * Z)/sum(weight)),
+            var_z = 1/sum(weight))
+
+model_species <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  1,
+                       random = list(~1|tip_label),
+                        R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = mean_species)
+
+resultsmodel_species <- orchaRd::mod_results(model_species, mod = "1", at = NULL,  group = "tip_label")
+ 
+## draw a species-level caterpillar plot (summarised effect sizes)
+orchaRd::caterpillars(resultsmodel_species, mod="1", xlab = "Standardised mean difference") 
+
+```
+ 
+```{r upload bioclimatic variables from worldclim }
+
+### upload climatic data from worldclim
+worldclim <- read_csv(here("DATA_files", "worldclim_trade-offs_meta.csv")) 
+
+## check whether the coordinates match between datasets
+setdiff(meta_INC$latitude, worldclim$latitude)
+setdiff(meta_INC$longitude, worldclim$longitude)
+ 
+### grouping argument
+by_cols <- c("longitude", "latitude") 
+
+# Inspect classes
+sapply(meta[by_cols], class)
+sapply(worldclim[by_cols], class)
+
+# See which rows from df1 fail to find a match in df2
+miss_1_in_2 <- anti_join(meta_INC, worldclim, by = by_cols)
+miss_2_in_1 <- anti_join(worldclim, meta_INC, by = by_cols)
+
+miss_1_in_2 %>% slice_head(n = 10)
+miss_2_in_1 %>% slice_head(n = 10)
+
+# normalize keys in a function to match all records from two datasets
+norm_keys <- function(d, keys) {
+  d %>%
+    mutate(across(all_of(keys), \(x) {
+      # convert types first
+      if (inherits(x, "factor")) x <- as.character(x)
+      # normalize unicode (NFC), swap NBSP to space, trim, squish, lower-case
+      if (is.character(x)) {
+        x <- stri_trans_nfc(x)
+        x <- chartr("\u00A0", " ", x)
+        x <- trimws(gsub("\\s+", " ", x))
+        x <- tolower(x)
+      }
+      # round numerics used as keys (if applicable)
+      if (is.numeric(x)) x <- round(x, 6)
+      x
+    }))
+}
+ 
+meta_INC <- norm_keys(meta_INC, by_cols)
+worldclim <- norm_keys(worldclim, by_cols)
+ 
+## control check whether the longitude is consistent across datasets
+setdiff(meta_INC$longitude, worldclim$longitude)
+
+### worldclim scaling
+
+worldclim <-  worldclim[,-1 ] 
+
+worldclim <- worldclim[!duplicated(worldclim), ]
+
+exclude_cols <- c("longitude", "latitude")
+
+# Scale all other columns
+worldclim_sc <- worldclim %>%
+  mutate(across(
+    .cols = -all_of(exclude_cols),
+    .fns = ~ scale(.)[, 1]  # scale returns a matrix, so extract the vector
+  ))
+
+str(worldclim)
+
+### upload VPD extracted from terraclimate
+vpd_locations <- read.csv(here("DATA_files","vpd-locations_trade-offs_meta.csv"))
+
+### merging data frames (scaled values and non-scaled)
+meta_FINAL_wc <- left_join(meta_INC, worldclim_sc, by =c("longitude", "latitude")) 
+
+meta_FINAL_nonsc <- left_join(meta_INC, worldclim, by =c("longitude", "latitude")) 
+
+meta_FINAL  <- meta_FINAL_wc  %>%  
+  left_join(vpd_locations, by = join_by(replicate_site == replicate_site, latitude == lat, longitude == lon  )) 
+
+
+```
+
+ 
+
+
+```{r  functional traits at the species level}
+### upload trait data of different species
+
+speciesTraits <- read_csv(here("DATA_files", "speciesTraits_trade-offs_meta.csv")) %>% dplyr::select(-1) %>%
+mutate(tip_label = str_replace(Species,' ','_')) %>% rename(genus = Genus) %>% 
+  as.data.frame()
+
+#add wood density of two genera:
+speciesTraits <- speciesTraits %>%
+  mutate(wood_density_imp = case_when(
+    genus == "Cassiope" ~ paste0("0.836"),
+    genus == "Fouquieria" ~ paste0("0.327") ,
+  .default = as.character(wood_density_imp) ) )
+ 
+### fill the missing data for SLA by reversing LMA
+
+for (i in seq_along(speciesTraits$SLA)) {
+  if (is.na(speciesTraits$SLA[i])) {
+    speciesTraits$SLA[i] <- (1 / speciesTraits$LMA[i]) 
+  }
+}
+
+# Fouquieria,diguetii,,0.326666667 wood density grams/m
+# Cassiope tetragona: 0.836
+ 
+
+str(speciesTraits)
+speciesTraits$wood_density_imp <- as.numeric(speciesTraits$wood_density_imp)
+
+colnames(speciesTraits)
+
+speciesTraits_log_sc <- speciesTraits %>%  
+  dplyr::select(where(is.numeric) & !c(P50)) %>%
+mutate_all(~ log(.)) %>% mutate(P50 = speciesTraits$P50, 
+tip_label = speciesTraits$tip_label, genus = speciesTraits$genus) %>%
+  mutate(across(where(is.numeric), ~ scale(.)[, 1]))
+  
+## scale traits in dataframe but without log-transformation
+speciesTraits_scaled <- speciesTraits %>%
+  mutate(across(where(is.numeric), ~ scale(.)[, 1]))
+
+#merging data frames
+
+meta_nonsc_trait <-left_join(meta_FINAL_nonsc,speciesTraits, by = c("tip_label", "genus"))
+
+meta_FINAL <- left_join(meta_FINAL,speciesTraits_log_sc, by = c("tip_label", "genus"))
+
+
+#### CVp adjusted from papers and non-logged and non-scaled from mastree
+
+meta_nonsc_trait <- meta_nonsc_trait %>% 
+mutate(meanCVp = coalesce(as.numeric(CVp),mean_CVp))
+
+## NAs introduced due to missing information on CVp
+ 
+meta_FINAL$meanCVp = meta_nonsc_trait$meanCVp
+
+
+### adding variable of the median year of the study and last year of the study
+ 
+meta_FINAL$median_year <- sapply(strsplit(meta_FINAL$years, "-"), function(x) {
+  years <- as.numeric(x)
+  floor(mean(years))  # Or use round(mean(years)) if you prefer rounding
+})
+
+meta_FINAL$max_year <- sapply(strsplit(meta_FINAL$years, "-"), function(x) {
+  years <- as.numeric(x)
+  floor(max(years))  # Or use round(mean(years)) if you prefer rounding
+})
+
+str(meta_FINAL)
+
+### subseting data to current year only
+
+meta_FINAL_1y <- meta_FINAL %>%
+filter(H1 == "zero")
+
+meta_nonsc_trait_1y <- meta_nonsc_trait %>%
+filter(H1 == "zero")
+
+```
+
+
+### rma model testing first hypothesis with time lags (H1 as a categorical variable in mods) with the conservative phylogenetic relatedness included
+
+### intercept at 0
+### variance explained by study_id and effect_size_id, but not by phylogeny
+### trade-off is present only in current year (highly significant) but T-1 and T+1 are not different from 0
+### correlations at T-1 and T+1 are not different from 0
+
+## a complementary model without phylogenetic relatedness (only species effect of tip_label)
+
+all tested models follow the same structure:
+ 
+model0.1 = the main model including phylogenetical relatedness based on the Zanne et al.2016 paper with conservative divergence time
+model0.2 = a coplementary model with species random effect instead of phylogenetic matrix
+model0.3 = an extra model including phylogenetical relatedness from open tree of life (rotl) with relative divergence time (Grafen's method)
+  
+ 
+```{r FULL and FINAL MODELS with all variables }
+
+###        CURRENT YEAR OBSERVATIONS ONLY
+
+### rma model testing further hypotheses excluding time lags to keep the main biological meaning 
+## model with conservative phylogenetic relatedness
+ 
+
+modelFINALnull <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ 1 ,
+                    random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                         control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+                        
+summary(modelFINALnull)
+
+## check study heterogeneity and R2 of the model
+i2_ml(modelFINALnull) 
+r2_ml(modelFINALnull) 
+
+orchard_plot(modelFINALnull, group = "title",  xlab = "Z scores")
+
+##  mean Z value is significantly lower than 0 (trade-offs detected)
+### large amount of variance explained by phylogeny and study_id
+
+
+## null rma model with rotl phylogeny
+## large amount of variance explained by phylogeny = trade-off non-detected despite negative estimate
+
+###################
+
+#### rma model without phylogeny 
+
+NULLmodel0.1 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ 1,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+
+summary(NULLmodel0.1)
+
+
+orchard_plot(NULLmodel0.1, group = "title",  xlab = "Z scores")
+
+
+## model with another phylogeny 
+
+NULLmodel0.2 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ 1,
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+
+summary(NULLmodel0.2)
+
+orchard_plot(NULLmodel0.2, group = "title",  xlab = "Z scores")
+
+##  mean Z value is non-significantly lower than 0 (trade-offs undetected)
+### large amount of variance explained by phylogeny and study_id
+
+
+### compare AIC of null models
+
+AIC(modelFINALnull,NULLmodel0.1,NULLmodel0.2)
+
+### models with phylogeny have slightly better AIC value
+
+## old codes
+# sp_eff <- blup(NULLmodel0.1)$tip_label   # pseudo-code; extract species random effects/BLUPs
+# phytools::phylosig(phy, sp_eff, method = "lambda", test = TRUE)
+
+### figures - caterpillar plots
+
+model_resultsNULL <- orchaRd::mod_results(modelFINALnull, mod = "1", at = NULL,  group = "title")
+ 
+  orchaRd::caterpillars(model_resultsNULL, mod="1", xlab = "Standardised mean difference")  + 
+theme(axis.text.x =element_text(size = 16), 
+           axis.title=element_text(size = 16),
+           legend.text = element_text(size=14))
+
+## model with no phylogeny
+
+model_results0.1 <- orchaRd::mod_results(NULLmodel0.1, mod = "1", at = NULL,  group = "title")
+ 
+orchaRd::caterpillars(model_results0.1, mod="1", xlab = "Standardised mean difference") 
+  
+## model with phylogeny matrix  
+
+model_results0.2 <- orchaRd::mod_results(NULLmodel0.2, mod = "1", at = NULL,  group = "title")
+ 
+orchaRd::caterpillars(model_results0.2, mod="1", xlab = "Standardised mean difference")
+    
+
+ ### plot with current year effect size (null final model) 
+
+plot1b <- orchaRd::caterpillars(model_resultsNULL, mod="1", xlab = "Effect size (Z-score)",  g = FALSE, k = FALSE, overall = FALSE,  colerrorbar = "darkgreen" , colpoly = "darkorange" , colpoint = "#ffe699")   + labs(title="B")  +
+theme(axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 18),
+           legend.text = element_text(size=20),
+          axis.text.y =element_text(size = 20),
+         plot.title  = element_text(size=24))
+
+#FIGURE1b
+plot1b
+ 
+### old plot showing lagged effects and pulled current year effect
+print(plot2b + plot1b)
+
+
+ 
+## 2) Arrange side-by-side with shared legend (optional)
+# guides = "collect" pulls legends together; adjust widths so neither title is squashed
+
+plot1 <- (plot1a + plot1b ) +
+  plot_layout(widths = c(1, 1)) +
+my_theme
+
+
+plot1
+
+## 3) Save to a high-quality PDF (vector, embedded fonts)
+# Pick a sensible width/height; ~16x7 inches works well for two side-by-side panels.
+# Use device = cairo_pdf for robust font embedding across platforms.
+
+ggsave(
+  filename = "plot1.pdf",
+  plot     = plot1,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 16,
+  height   = 9,
+  units    = "in"
+)
+
+
+combined <- (plot1a + plot1b ) +
+  plot_layout(guides = "collect", widths = c(1, 1)) +
+my_theme
+
+#ggsave("H1_plot.pdf", height = 12, width = 12)
+#dev.off()
+
+plot1bSOLO <- orchaRd::caterpillars(model_results0.1, mod="1", xlab = "Effect size (Z-score)", g = FALSE, overall = FALSE,  colerrorbar = "darkgreen" , colpoly = "black" , colpoint = "#ffe699")   + labs(title="B") +
+theme(axis.text.x =element_text(size = 30), 
+           axis.title=element_text(size = 26),
+           legend.text = element_text(size=30),
+          axis.text.y =element_text(size = 30),
+         plot.title  = element_text(size=24))
+
+plot1bSOLO
+ 
+
+ggsave(
+  filename = "plot1bSOLO.png",
+  plot     = plot1bSOLO,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 12,
+  height   = 10,
+  units    = "in"
+)
+
+
+
+```
+
+
+```{r new data frame for testing lags}
+
+###  grouping data according to the population and lag
+
+meta_lags_long <- meta_INC %>%
+filter(H1 != "NA") %>% 
+    group_by(pop_id,tip_label,replicate_site,title,H1) %>%
+reframe(pop_id = unique(pop_id),
+meanZ = mean(Z,na.rm=T),
+)
+ 
+#### 
+
+meta_lags_final <- dcast(
+  meta_lags_long,
+ title +  replicate_site + tip_label + pop_id   ~ H1,   # rows = site × species, columns = category
+  value.var = "meanZ"         ,  # what to put into the cells,
+)
+
+ 
+
+### adding value from minus one and plus one year lag to the dataset
+
+meta_FINAL_1y <- meta_FINAL_1y %>%
+  left_join(meta_lags_final, by = join_by(pop_id == pop_id , title == title, tip_label == tip_label, replicate_site == replicate_site)) 
+
+## zero is Z value
+## minus 1 is the correlation between growth and reproduction from the previous year
+## plus1 is the correlation between growth and reproduction in the following year
+
+
+```
+
+
+ 
+```{r  within species correlations between effect sizes according to the lags}
+ 
+###### testing lag effects within observations 
+###### are trade-offs stronger if correlations in T-1 and T+1 are positive/negative
+ 
+inter_lags_model <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  minus1 + plus1,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(inter_lags_model)    
+ 
+  
+## check study heterogeneity and R2 of the model
+i2_ml(inter_lags_model) 
+r2_ml(inter_lags_model) 
+
+### the more positive correlations in T-1 strengthen the trade-offs between reproduction and growth (= more negative correlations in T)
+## much variance explained by study_id
+
+## model0.1
+
+inter_lags_model0.1 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  minus1 + plus1,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(inter_lags_model0.1)    
+
+###
+                
+inter_lags_model0.2 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  minus1 + plus1,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(inter_lags_model0.2)   
+
+## check study heterogeneity and R2 of the model
+i2_ml(inter_lags_model0.2) 
+r2_ml(inter_lags_model0.2) 
+
+### change in effect sizes according to the plant group
+
+inter_lags_model1.0 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                          mods = ~   minus1 ,
+                      # mods = ~  minus1 * plant_type, 
+                       # mods = ~  minus1 * meanCVp, 
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(inter_lags_model1.0)    
+
+### exploratory plots
+  
+## scatter plot of values between two years
+plot(meta_FINAL_1y$minus1,meta_FINAL_1y$plus1)
+
+bubble_interlag_types <- orchaRd::mod_results(inter_lags_model0.1, mod = "minus1", group = "title",
+                    weights = "prop")
+
+
+orchaRd::bubble_plot(bubble_interlag_types, group = "title",  mod = "minus1", xlab = "minus1", legend.pos = "top.left") + 
+geom_point(data = meta_FINAL_1y, aes(x =  minus1, y = Z, 
+                                     color = plant_type, size = 1/sqrt(var_z)), alpha = 0.6) +  scale_colour_manual(values=c("darkorange","black")) 
+
+##
+## plot with autocorrelations and different CVp values
+ 
+bubble_interlag_cvp <- orchaRd::mod_results(inter_lags_model0.1, mod = "minus1", group = "title",
+                    weights = "prop")
+ 
+
+orchaRd::bubble_plot(bubble_interlag_cvp, group = "title",  mod = "minus1", xlab = "minus1", legend.pos = "top.left") + 
+geom_point(data = meta_FINAL_1y, aes(x =  minus1, y = Z,  color = meanCVp, size = 1/sqrt(var_z)), alpha = 0.6)   + scale_colour_viridis_b()
+
+
+
+
+## FIGURE 2
+## final plot with significant effect of Z from previous year
+ 
+
+bubble_interlag <- orchaRd::mod_results(inter_lags_model, mod = "minus1", group = "title",
+                    weights = "prop")
+
+
+orchaRd::bubble_plot(bubble_interlag, group = "title",  mod = "minus1", xlab = "minus1", legend.pos = "top.left", est.col = "grey",  
+  ci.col = "red",
+  pi.col = "blue",) + 
+geom_point(data = meta_FINAL_1y, aes(x = minus1, y = Z,   size = 1/sqrt(var_z)), alpha = 0.2)   
+  
+
+plot2leg <- orchaRd::bubble_plot(bubble_interlag, group = "title",  mod = "minus1", xlab = "minus1", legend.pos = "top.right") +  scale_fill_manual(values=c("darkred")) +   theme(legend.direction = "vertical")   + theme(axis.text.y =element_text(size = 14), 
+       axis.text.x =element_text(size = 16), 
+           axis.title=element_text(size = 16),
+           legend.text = element_text(size=14),
+           legend.title = element_text(size=12)
+          ) + labs(x="Z-score in t-1", y = "Z-score in t", title = "C") +
+  theme(aspect.ratio = (1))
+
+plot2leg
+
+leg <- ggpubr::get_legend(plot2leg)
+
+
+## FIGURE 2C
+
+plot2c <- orchaRd::bubble_plot(bubble_interlag, group = "title",  mod = "minus1", xlab = "minus1", legend.pos = "none", k.pos = "bottom.left") +  scale_fill_manual(values=c("darkred")) +   theme(legend.direction = "vertical")   + labs(x="Z-score in t-1", y = "Z-score in t", title = "C") + theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+
+plot2c
+  
+  geom_point(data = meta_FINAL_1y, aes(x = minus1, y = Z,  size = 1/sqrt(var_z)), alpha = 0.5) +  theme(legend.direction = "vertical")   +
+#scale_colour_manual(values=c( "darkgreen")) +
+scale_fill_manual(values=c("orange"))   + 
+theme(axis.text.y =element_text(size = 14), 
+       axis.text.x =element_text(size = 16), 
+           axis.title=element_text(size = 16),
+           legend.text = element_text(size=14),
+           legend.title = element_text(size=12)
+          ) + 
+  theme(aspect.ratio = (1))
+     
+
+## final plot with nonsignificant effect of Z between T0 and T1 (subsequent year)
+#### FIGURE 2D
+
+bubble_interlag2 <- orchaRd::mod_results(inter_lags_model, mod = "plus1", group = "title",
+                    weights = "prop")
+
+
+plot2d <- orchaRd::bubble_plot(bubble_interlag2, group = "title",  mod = "plus1", xlab = "plus1", legend.pos = "none", est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left") +  scale_fill_manual(values=c("grey")) + labs(x="Z-score in t+1", y = "Z-score in t", title = "D") +
+theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+
+plot2d
+
+plot2 <- plot2b + (plot2c/plot2d)  +
+  plot_layout(widths = c(1, 1)) +
+my_theme
+
+plot2
+
+ggsave(
+  filename = "plot2.pdf",
+  plot     = plot2,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 16,
+  height   = 10,
+  units    = "in"
+)
+
+ggsave(
+  filename = "plot2.png",
+  plot     = plot2,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 16,
+  height   = 10,
+  units    = "in"
+)
+
+## check other size 
+
+ggsave(
+  filename = "plot2.pdf",
+  plot     = plot2,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 15,
+  height   = 10,
+  units    = "in"
+)
+plot2b_SOLO <- plot2b + theme(axis.text.y =element_text(size = 25), 
+       axis.text.x =element_text(size = 25), 
+           axis.title=element_text(size = 25),
+           legend.text = element_text(size=25),
+      plot.title = element_text(size=25) )   
+     
+plot2b_SOLO  
+ 
+plot2b_SUP
+
+ggsave(
+  filename = "plot2b_SUP.pdf",
+  plot     = plot2b_SUP,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 12,
+  height   = 10,
+  units    = "in"
+)
+
+
+ggsave(
+  filename = "plot1aSOLO.png",
+  plot     = plot1aSOLO,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 10,
+  height   = 10,
+  units    = "in"
+)
+
+
+plot2SOLO <- (plot2c + plot2d)  + theme(axis.text.y =element_text(size = 25), 
+       axis.text.x =element_text(size = 25), 
+           axis.title=element_text(size = 25),
+           legend.text = element_text(size=25),
+      plot.title = element_text(size=25) )   
+
+
+```
+
+####### none of the tested extra models showed significant effect of climate and traits (PCA of all traits at the end of the script)
+
+```{r correlations between traits }
+
+cor.test(meta_FINAL_1y$seed_mass, meta_FINAL_1y$Height) 
+cor.test(meta_FINAL_1y$seed_mass, meta_FINAL_1y$wood_density_imp) 
+cor.test(meta_FINAL_1y$seed_mass, meta_FINAL_1y$SLA) 
+cor.test(meta_FINAL_1y$seed_mass, meta_FINAL_1y$`Annual Mean Temperature`)
+
+cor.test(meta_FINAL_1y$wood_density_imp, meta_FINAL_1y$Height) 
+cor.test(meta_FINAL_1y$SLA, meta_FINAL_1y$Height)
+cor.test(meta_FINAL_1y$`Annual Mean Temperature`,  meta_FINAL_1y$Height)
+
+cor.test(meta_FINAL_1y$SLA, meta_FINAL_1y$Height) 
+cor.test(meta_FINAL_1y$wood_density_imp, meta_FINAL_1y$SLA) 
+
+cor.test(meta_FINAL_1y$meanCVp, meta_FINAL_1y$SLA) 
+cor.test(meta_FINAL_1y$meanCVp, meta_FINAL_1y$wood_density_imp) 
+
+## no correlation between CVp and traits
+cor.test(meta_FINAL_1y$seed_mass, meta_FINAL_1y$meanCVp) 
+cor.test(meta_FINAL_1y$meanCVp, meta_FINAL_1y$Height) 
+
+### all species - raw data
+cor.test(speciesTraits$seed_mass, speciesTraits$Height) 
+
+str(meta_FINAL_1y)
+### CORRELATION BETWEEN CLIMATIC VARIABLES
+
+cor.test(meta_FINAL_1y$`Annual Mean Temperature`,  meta_FINAL_1y$`Max Temperature of Warmest Month`)
+cor.test(meta_FINAL_1y$`Annual Mean Temperature`,  meta_FINAL_1y$`Min Temperature of Coldest Month`)
+
+cor.test(meta_FINAL_1y$`Annual Mean Temperature`,  meta_FINAL_1y$`Mean Temperature of Warmest Quarter`)
+cor.test(meta_FINAL_1y$`Annual Mean Temperature`,  meta_FINAL_1y$`Mean Temperature of Coldest Quarter`)
+
+```
+
+```{r  methods etc}
+
+## non-significant effects of methods, biomes and plant type (a few models that do not belong to the manuscript)
+### model 1.0 - around time lags and different methods
+
+modelPLUS <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ H1 - 1 + plant_type + growth_type + reproduction_type + scale + biome ,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL)
+
+
+coef(summary(modelPLUS))
+
+orchard_plot(modelPLUS, mod = "H1", group = "title", by="scale", xlab = "Correlation coefficient", transfm = "none", alpha = 0.4, angle = 0,  cb = FALSE, legend.pos = "top.left", condition.lab = "Method") + theme(legend.direction = "vertical")  
+
+### 
+
+modelPLUS1 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  plant_type + growth_type + reproduction_type + scale + biome ,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+
+
+summary(modelPLUS1)
+
+###
+### methods only
+
+modelPLUS2 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~    growth_type + reproduction_type + scale + plant_type,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_INC)
+                        
+summary(modelPLUS2)
+
+#######
+
+orchard_plot(modelPLUS2, mod = "growth_type", group = "title", by="scale", xlab = "Correlation coefficient", transfm = "none", alpha = 0.4, angle = 0,  cb = FALSE, legend.pos = "top.left", condition.lab = "Method") + theme(legend.direction = "vertical")  
+
+orchard_plot(modelPLUS2, mod = "reproduction_type", group = "title", by="scale", xlab = "Correlation coefficient", transfm = "none", alpha = 0.4, angle = 0,  cb = FALSE, legend.pos = "top.left", condition.lab = "Method") + theme(legend.direction = "vertical")  
+
+###
+
+orchard_plot(modelPLUS1, mod = "scale", group = "title", by="plant_type", xlab = "Correlation coefficient", transfm = "none", alpha = 0.4, angle = 0,  cb = FALSE, legend.pos = "top.left", condition.lab = "Method") + theme(legend.direction = "vertical")  
+
+###
+
+
+modelH1_PLUS1 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ H1 -1 + plant_type + scale +  growth_type ,
+                    random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_matrix),
+                    control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL)
+
+summary(modelH1_PLUS1)
+
+### orchard plot with plant types
+
+orchard_plot(modelH1_PLUS1, mod = "growth_type", group = "title", by="growth_type", xlab = "Correlation coefficient", transfm = "none", alpha = 0.4, angle = 0,  cb = FALSE, legend.pos = "top.left", condition.lab = "Method") + theme(legend.direction = "vertical")  
+ 
+
+##  MODEL testing different scales and methods (in the supplement)
+
+model_methods <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~    growth_type + scale  + reproduction_type + plant_type,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+                        
+summary(model_methods)
+
+## check study heterogeneity and R2 of the model
+i2_ml(model_methods) 
+r2_ml(model_methods) 
+
+## calculate percentage of variance explained by random effects
+0.0558 / (0.0558+0.0463)
+0.0463 / (0.0558+0.0463)
+
+####### sensitivity analysis (models 0.1 without phylogeny)
+model_methods0.1 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~    growth_type + scale  + reproduction_type + plant_type,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+
+## model 0.2 based on the syntethic tree
+model_methods0.2 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~    growth_type + scale  + reproduction_type + plant_type,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+
+####### 
+summary(model_methods0.1)     
+summary(model_methods0.2)
+
+## check study heterogeneity and R2 of the model
+i2_ml(model_methods0.2) 
+r2_ml(model_methods0.2) 
+
+## calculate percentage of variance explained by random effects
+0.0874 / (0.0874 + 0.0468)
+
+####### consistent patterns across all models
+
+plotM1 <- orchard_plot(model_methods, mod = "growth_type", group = "title",  xlab = "Z-score", transfm = "none", alpha = 0.5, angle = 0,  cb = FALSE, legend.pos = "top.left", condition.lab = NULL, k = TRUE, g = FALSE) + theme(legend.direction = "horizontal") + labs(title = "A") + 
+  scale_fill_manual(values=c("purple3","darkgreen","brown4")) + 
+  scale_color_manual(values=c("purple4","green3","brown2")) +
+  theme(axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 18),
+           legend.text = element_text(size=20),
+          axis.text.y =element_text(size = 20),
+         plot.title  = element_text(size=24))
+
+plotM2 <-  orchard_plot(model_methods, mod = "reproduction_type", group = "title",  xlab = "Z-score", transfm = "none", alpha = 0.5, angle = 0,  cb = FALSE, legend.pos = "top.left", condition.lab = NULL,  g = FALSE) + theme(legend.direction = "horizontal") + labs(title = "B") + scale_fill_manual(values=c("darkgreen","goldenrod2","red")) + scale_color_manual(values=c("green3","goldenrod1","red4")) +
+  theme(axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 18),
+           legend.text = element_text(size=20),
+          axis.text.y =element_text(size = 20),
+         plot.title  = element_text(size=24))
+
+plotM3 <-  orchard_plot(model_methods, mod = "scale", group = "title",  xlab = "Z-score", transfm = "none", alpha = 0.5, angle = 0,  cb = FALSE, legend.pos = "top.left", condition.lab = NULL,  g = FALSE) + theme(legend.direction = "horizontal")  +    labs(title = "C") + scale_fill_manual(values=c("blue2","green3")) + scale_color_manual(values=c("blue4","darkgreen")) +
+  theme(axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 18),
+           legend.text = element_text(size=20),
+          axis.text.y =element_text(size = 20),
+         plot.title  = element_text(size=24))
+
+plotM4 <-  orchard_plot(model_methods, mod = "plant_type", group = "title", xlab = "Z-score", transfm = "none", alpha = 0.5, angle = 0,  cb = FALSE, legend.pos = "top.left", condition.lab = NULL,  g = FALSE) + theme(legend.direction = "horizontal") + labs(title = "D") + scale_fill_manual(values=c("darkorange","black")) + scale_color_manual(values=c("darkorange","black")) +
+  theme(axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 18),
+           legend.text = element_text(size=20),
+          axis.text.y =element_text(size = 20),
+         plot.title  = element_text(size=24))
+
+## plot FIGURE S6
+methods_plot <- (plotM1 + plotM2 ) / (plotM3 + plotM4) 
+
+methods_plot
+
+# save FIGS6
+ggsave(
+  filename = "methods_orchard-plot.pdf",
+  plot     =  methods_plot,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 16,
+  height   = 12,
+  units    = "in"
+)
+
+ggsave(
+  filename = "methods_orchard.png",
+  plot     =  methods_plot,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 16,
+  height   = 12,
+  units    = "in"
+)
+
+
+```
+
+ 
+ 
+```{r  FINAL MODELS AND THEIR COEFFICIENT PLOTS} 
+
+### FINAL MODEL AND FIGURE 4
+
+##### climate interaction statistics in the model below
+
+FINALmodel_H3_int  <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   `Annual Mean Temperature` * `Annual Precipitation` + vpd +
+                        SLA + wood_density_imp  + plant_height + seed_mass,   
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(FINALmodel_H3_int) 
+
+## nonsignificant interaction ---> best model with additive effects only
+
+FINALmodel_H3  <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   `Annual Mean Temperature` + `Annual Precipitation` + vpd +
+                        SLA + wood_density_imp  + plant_height + seed_mass,   
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                         R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+ summary(FINALmodel_H3) 
+
+## check study heterogeneity and R2 of the model
+i2_ml(FINALmodel_H3) 
+r2_ml(FINALmodel_H3) 
+
+## calculate percentage of variance explained by random effects
+0.0418 / (0.0418 + 0.0543) # phylogeny explains 43% of random effect variation
+
+## nonsignificant effects in the full model
+
+## model reduced to additive effects without phylogeny 
+
+FINALmodel_H3_0.1 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~    `Annual Mean Temperature` + `Annual Precipitation` + vpd + SLA + wood_density_imp  + plant_height + seed_mass,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id), 
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(FINALmodel_H3_0.1)       
+
+## non-significant effects in the full simplified model
+
+## model reduced to additive effects with phylogeny from open tree of life
+
+FINALmodel_H3_0.2 <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~    `Annual Mean Temperature` + `Annual Precipitation` + vpd + SLA + wood_density_imp  + plant_height + seed_mass,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id), 
+                         R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(FINALmodel_H3_0.2)         
+
+## check study heterogeneity and R2 of the model
+i2_ml(FINALmodel_H3_0.2) 
+r2_ml(FINALmodel_H3_0.2) 
+
+## calculate percentage of variance explained by random effects
+0.0641 / (0.0641 + 0.0535) #  phylogeny explains 55% of random effect variation
+       
+## non-significant effects in the full model with rotl phylogeny
+
+## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## 
+## model reduced to additive effects only and with CVp (but on reduced number of 48 species compared to the full model with 79)
+
+modelCV_H3_1.0  <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  meanCVp + `Annual Mean Temperature` + `Annual Precipitation` + 
+                          SLA + wood_density_imp  + plant_height + seed_mass ,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(modelCV_H3_1.0) 
+
+## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## 
+## FIGURE 4
+### coefficient plot for model H3
+
+coefFINALmodel <- coef(summary(FINALmodel_H3))
+
+rownames(coefFINALmodel) <-  c ( "Intercept" , "Mean Annual Temperature" ,"Mean Annual Precipitation" , "Mean VPD", "SLA", "Wood density",  "Plant height"  ,  "Seed mass"  )
+
+coefFINALmodel <- coefFINALmodel %>% mutate(across(c(1:6), as.numeric) )  
+ 
+ 
+c <- coefFINALmodel %>%
+  ggplot(aes(y = fct_rev(rownames(coefFINALmodel)))) + 
+  theme_classic()
+
+plot_H3   <- c +  geom_point(aes(x=estimate), shape=15, size=3) +
+  geom_linerange(aes(xmin=ci.lb, xmax=ci.ub))   +  geom_vline(xintercept = 0, linetype="dashed", colour ="darkgrey") +
+  theme(text = element_text(size = 15)) + 
+  labs(x="Z-score (± 95% CI)", y="")  + coord_cartesian(  xlim=c(-.8, .8))   +
+   scale_x_continuous(breaks = c(-0.5,-0.25,0,0.25,0.5))
+                            
+plot_H3
+ 
+ggsave(
+  filename = "H3_plot.pdf",
+  plot     =  plot_H3,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 7,
+  height   = 6,
+  units    = "in"
+)
+
+
+```
+
+```{r TRAIT model and the effects between Z and each trait (raw data and bubble plots for scaled and non-scaled models)}
+
+## two relevant final models
+
+summary(FINALmodel_H3) 
+
+# # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # #
+# # # # plot based on final model with annual temperature
+
+bubble_temp  <- orchaRd::mod_results(FINALmodel_H3, mod = "Annual Mean Temperature", group = "title",
+                    weights = "prop")
+                                 
+H3_temp <- orchaRd::bubble_plot(bubble_temp, group = "title",  mod = " `Annual Mean Temperature`", xlab = "MAT", legend.pos = "none", est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left") + 
+geom_point(data = meta_FINAL_1y, aes(x =  `Annual Mean Temperature`, y = Z,   size = 1/sqrt(var_z)), alpha = 0.2, colour="black")  +
+#  labs(x="Z-score in t+1", y = "Z-score in t", title = "D") +
+theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))  
+
+# # # # plot based on final model with precipitation
+
+bubble_prec <- orchaRd::mod_results(FINALmodel_H3, mod = "Annual Precipitation", group = "title",
+                    weights = "prop")
+                                 
+H3_prec <- orchaRd::bubble_plot(bubble_prec, group = "title",  mod = "Annual Precipitation", xlab = "MAP", legend.pos = "none", est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left") + 
+geom_point(data = meta_FINAL_1y, aes(x =  `Annual Precipitation`, y = Z,  size = 1/sqrt(var_z)), alpha = 0.2)  + 
+  #  labs(x="Z-score in t+1", y = "Z-score in t", title = "D") +
+theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+
+ 
+# # # # plot based on final model with vpd
+
+bubble_vpd <- orchaRd::mod_results(FINALmodel_H3, mod = "vpd", group = "title",
+                    weights = "prop")
+                                 
+H3_vpd <- orchaRd::bubble_plot(bubble_vpd, group = "title",  mod = "vpd", xlab = "Mean VPD", legend.pos = "none", est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left") + 
+geom_point(data = meta_FINAL_1y, aes(x =  vpd, y = Z,  size = 1/sqrt(var_z)), alpha = 0.2)  + 
+  #  labs(x="Z-score in t+1", y = "Z-score in t", title = "D") +
+theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+
+
+# # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # #
+# # # #  plot based on final model - SLA
+bubble_SLA  <- orchaRd::mod_results(FINALmodel_H3, mod = "SLA", group = "title",
+                    weights = "prop")
+                                 
+H3_SLA <- orchaRd::bubble_plot(bubble_SLA, group = "title",  mod = "SLA", xlab = "SLA", legend.pos = "none", est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left") + 
+geom_point(data = meta_FINAL_1y, aes(x = SLA, y = Z,  size = 1/sqrt(var_z)), alpha = 0.2)  + 
+  #  labs(x="Z-score in t+1", y = "Z-score in t", title = "D") +
+theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+
+
+# # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # #
+# # # #  plot based on final model - WOOD DENSITY
+bubble_wood <- orchaRd::mod_results(FINALmodel_H3, mod = "wood_density_imp", group = "title",
+                    weights = "prop")
+                                 
+H3_wd <-orchaRd::bubble_plot(bubble_wood, group = "title",  mod = "wood_density_imp", xlab = "Wood density", legend.pos = "none", est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left") + 
+geom_point(data = meta_FINAL_1y, aes(x = wood_density_imp, y = Z, size = 1/sqrt(var_z)), alpha = 0.2) + 
+  #  labs(x="Z-score in t+1", y = "Z-score in t", title = "D") +
+theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+
+
+# # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # #
+# # # #  plot based on final model - HEIGHT
+bubble_height  <- orchaRd::mod_results(FINALmodel_H3, mod = "plant_height", group = "title",
+                    weights = "prop")
+                                 
+H3_height <- orchaRd::bubble_plot(bubble_height, group = "title",  mod = "plant_height", xlab = "Plant height", legend.pos = "none", est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left") + 
+geom_point(data = meta_FINAL_1y, aes(x = plant_height, y = Z,  size = 1/sqrt(var_z)), alpha = 0.2)  + 
+  #  labs(x="Z-score in t+1", y = "Z-score in t", title = "D") +
+theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+
+  # # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # #
+# # # #  plot based on final model - SEED MASS
+
+bubble_seed <- orchaRd::mod_results(FINALmodel_H3, mod = "seed_mass", group = "title",
+                    weights = "prop")
+                                 
+H3_seed <- orchaRd::bubble_plot(bubble_seed, group = "title",  mod = "seed_mass", xlab = "Seed mass", legend.pos = "none", est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left") + 
+geom_point(data = meta_FINAL_1y, aes(x = seed_mass, y = Z,  size = 1/sqrt(var_z)), alpha = 0.2) + 
+  #  labs(x="Z-score in t+1", y = "Z-score in t", title = "D") +
+theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+
+ 
+# # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # ## # # # 
+ ## # # #  arrange plots for FIGURE S11
+
+raw_data_plots <-( H3_temp + H3_prec + H3_vpd  ) / (H3_SLA + H3_wd ) / ( H3_height + H3_seed)
+    
+raw_data_plots
+ 
+ggsave(
+  filename = "raw_data_plots.pdf",
+  plot     =  raw_data_plots,
+  #device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 15,
+  height   = 14,
+  units    = "in"
+)
+
+```
+
+
+
+```{r year of study and cvp - hypothesis 4}
+
+### model with CVp and year of study (change of trade-offs over time)
+
+modelCV  <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   (meanCVp)  * (max_year),
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+                        
+summary(modelCV)
+
+## check study heterogeneity and R2 of the model
+i2_ml(modelCV) 
+r2_ml(modelCV)
+
+## calculate percentage of variance explained by random effects
+0.0382 / (0.0382+0.0285) # phylogeny explains 57% of random variation
+0.0285 / (0.0382+0.0285)
+
+### raw data with CVp and time
+
+bubble_cvp <- orchaRd::mod_results(modelCV, mod = "meanCVp", group = "title",
+                    weights = "prop")
+                                 
+CVp_raw_data <- orchaRd::bubble_plot(bubble_cvp , group = "title",  mod = "meanCVp", xlab = "Mean CVp", legend.pos = "none", est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left") +
+geom_point(data = meta_FINAL_1y, 
+aes(x = meanCVp, y = Z, size = 1/sqrt(var_z)), alpha = 0.2)  +
+theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+ 
+
+bubble_cvp_time <- orchaRd::mod_results(modelCV, mod = "max_year", group = "title",
+                    weights = "prop")
+                                 
+time_raw_data <- orchaRd::bubble_plot(bubble_cvp_time , group = "title",  mod = "max_year", xlab = "Final year of the study", legend.pos = "none",est.lwd = 0.5, est.col = NA, ci.col = NA ,pi.col = NA, k.pos = "bottom.left")+
+geom_point(data = meta_FINAL_1y, 
+aes(x = max_year, y = Z,  size = 1/sqrt(var_z)), alpha = 0.2) +
+  theme(plot.title =element_text(size = 25), axis.text.y =element_text(size = 20), 
+       axis.text.x =element_text(size = 20), 
+           axis.title=element_text(size = 20),
+           legend.text = element_text(size=20),
+           legend.title = element_text(size=20) ) +
+  theme(aspect.ratio = (1))
+
+
+## plots
+CVp_raw_data + time_raw_data
+
+#######################################################################
+## model without phylogeny
+modelCV_0.1 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~    (meanCVp)  * (max_year),
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+                        
+summary(modelCV_0.1)
+
+## model based on the syntethic tree
+modelCV_0.2 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   (meanCVp)  * (max_year),
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+                        
+summary(modelCV_0.2)
+
+## check study heterogeneity and R2 of the model
+i2_ml(modelCV_0.2) 
+r2_ml(modelCV_0.2)
+
+## calculate percentage of variance explained by random effects
+0.0860/ (0.0860 + 0.0200) #  phylogeny 81
+0.0200/ (0.0860 + 0.0200) # 
+
+
+########### medians of year study
+
+modelmedCV_0.2 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   scale(meanCVp)  *  scale(median_year),
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+                        
+summary(modelmedCV_0.2)
+
+
+modelCV_1.2 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~    scale(meanCVp)  *  scale(median_year),
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+                        
+summary(modelCV_1.2)
+
+
+
+modelCV_2.2 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   scale(meanCVp)  * scale(median_year),
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+                        
+summary(modelCV_2.2)
+
+vif(modelCV_0.2)
+
+### plot with CVp
+
+bubble_CV1  <- orchaRd::mod_results(modelCV, mod = "meanCVp", group = "title",
+                    weights = "prop")
+                    
+                    
+orchaRd::bubble_plot(bubble_CV1, group ="title",  mod = "meanCVp" , xlab = "CVp",  legend.pos = "top.left")   +
+geom_point(data = meta_FINAL_1y, aes(x = meanCVp, y = Z, size = 1/sqrt(var_z)), alpha = 0.6) + scale_color_discrete()
+  
+  
+  
+### plot with max year
+bubble_CV2  <- orchaRd::mod_results(modelCV_0.1, mod = "max_year", group = "title",
+                    weights = "prop")
+                    
+                    
+orchaRd::bubble_plot(bubble_CV2, group ="title",  mod = "max_year" , xlab = "max_year",  legend.pos = "top.left")   +
+geom_point(data = meta_FINAL_1y, aes(x = max_year, y = Z, size = 1/sqrt(var_z)), alpha = 0.6) + scale_color_discrete()
+
+
+
+## ## ## model with median year (consistent pattern) but using entire data set with H1 interaction
+
+modelCV_0.3 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                      mods = ~ H1 *  scale(meanCVp)  *  scale(median_year),
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                         R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL %>% filter(!H1 == "NA"))
+                        
+summary(modelCV_0.3)
+
+modelCV_1.3 <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                      mods = ~   scale(meanCVp)  *  scale(median_year),
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL)
+                        
+summary(modelCV_1.3)
+
+vif(modelCV_0.3)
+
+### extra model with climatic variables
+
+modelCV_extra <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  scale(meanCVp)  * scale(max_year) +  `Annual Mean Temperature` +  `Annual Precipitation` ,
+                   random = list(~1|tip_label,
+                                 ~1|title,
+                                 ~1|ES_id),
+                         R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+                        
+summary(modelCV_extra)
+
+### raw data across years
+ggplot(data=meta_FINAL_1y, aes(x=max_year,y = Z, col=meanCVp))  +
+geom_point() + geom_smooth(method = "lm", se = T)
+ 
+```
+ 
+
+```{r plot with predicted data}
+
+summary(modelCV)
+
+## small changes to the way the predictions are made - more dense sampling of values for year and CV
+
+time_vals <- seq(min(meta_FINAL_1y$max_year, na.rm = TRUE),
+                      max(meta_FINAL_1y$max_year, na.rm = TRUE), by = 0.1)
+
+cvp_vals <- seq(min(meta_FINAL_1y$meanCVp, na.rm = TRUE),
+                max(meta_FINAL_1y$meanCVp, na.rm = TRUE),
+                by = 0.001)
+
+
+newdat <- expand.grid(
+  meanCVp  =  as.numeric(cvp_vals),
+  max_year = as.numeric(time_vals),
+  KEEP.OUT.ATTRS = FALSE
+) 
+
+#####
+
+matriX <- model.matrix(~ meanCVp * max_year, data = newdat)
+colnames(matriX)[colnames(matriX) == "(Intercept)"] <- "intrcpt"              
+
+coef_namesX <- names(coef(modelCV))    # e.g. "intrcpt","cvp","time","cvp:time"
+beta_namesX <- setdiff(coef_names, "intrcpt")
+matriX <- matriX[, beta_namesX, drop = FALSE]                
+
+pred_matrix <- predict(modelCV, newmods = matriX)         
+
+plotdat <- cbind(newdat,
+                 pred  = as.numeric(pred_matrix$pred),
+                 ci.lb = as.numeric(pred_matrix$ci.lb),
+                 ci.ub = as.numeric(pred_matrix$ci.ub))
+
+df <- meta_FINAL_1y %>% ungroup()  %>% dplyr::select(max_year,meanCVp) ## give x and y for the graph
+
+df <- na.omit(df)
+
+convex_hull <- df %>% as_tibble() %>% dplyr::slice(chull(max_year,meanCVp)) ## give x and y for the graph
+
+coords <- as.data.frame(convex_hull)
+sp_poly <- SpatialPolygons(list(Polygons(list(Polygon(coords)), ID=1)))
+
+mm1 <- plotdat
+mm1 <- data.frame(mm1)
+
+sp_poly_df <- SpatialPolygonsDataFrame(sp_poly, data=data.frame(ID=1))
+
+spdf <- sp::SpatialPointsDataFrame(coords = mm1[, c("max_year","meanCVp")], data = mm1) 
+
+whatever <- spdf[!is.na(over(spdf, as(sp_poly_df, "SpatialPolygons"))), ]
+whatever <- as.data.frame(whatever)
+
+## FINAL PLOT - FIGURE 5 in manuscript
+   
+    plot_CVp <-  ggplot() +
+  geom_tile(data = whatever, aes(x = max_year, y = meanCVp, fill = pred)) +
+  scale_fill_gradient2(name = "Z", limits = c(-1.5, 0.5), high =  "#2166AC", mid ="#F7F7F7",
+low = "#B2182B", space = "Lab", midpoint = 0) +
+  geom_point(data = meta_FINAL_1y, aes(x = max_year, y = meanCVp), size = 5,
+             shape = 21,  colour = "black" , fill = "black", alpha = 0.4) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 18, colour = "black"),
+        axis.title.x = element_text(size = 20, colour = "black"),
+        axis.title.y = element_text(size = 20, colour = "black"),
+        plot.title = element_text(size = 24)) +
+  theme(legend.title=element_text(size = 20), 
+        legend.text=element_text(size = 18)) + 
+      labs(x="Final year of the study", y = "Mean CVp", title = "A")   + theme(aspect.ratio = (1))   
+
+ plot_CVp
+ 
+ ggsave(
+  filename = "plot4.png",
+  plot     = plot_CVp,
+  dpi = 800
+)
+ 
+ ggsave(
+  filename = "plot4.pdf",
+  plot     = plot_CVp,
+  width    = 12,
+  height   = 12,
+  units    = "in"
+)
+ 
+```
+ 
+ 
+extra plots with raw data in the supplement
+
+```{r plot with predicted data}
+
+###### plot with interaction shown as two linear predictions
+###### interaction terms as slopes
+######
+
+## choose values density for predictions
+ 
+  newdat_lines <- expand.grid(
+  meanCVp  = as.numeric(c(0.6,1.6)),
+  max_year = time_vals,
+  KEEP.OUT.ATTRS = FALSE
+)           
+                 
+ ## create prediction matrix 
+  
+X <- model.matrix(~ meanCVp * max_year, data = newdat_lines)
+colnames(X)[colnames(X) == "(Intercept)"] <- "intrcpt"              
+                 
+coef_names <- names(coef(modelCV))            # e.g. "intrcpt","cvp","time","cvp:time"
+beta_names <- setdiff(coef_names, "intrcpt")
+X <- X[, beta_names, drop = FALSE]                
+               
+ pr <- predict(modelCV, newmods = X)           
+               
+## prepare a data frame
+pred_cvp_plot <- cbind(newdat_lines,
+                 pred  = as.numeric(pr$pred),
+                 ci.lb = as.numeric(pr$ci.lb),
+                 ci.ub = as.numeric(pr$ci.ub))
+
+
+## 6) Plot two lines (one per CVp) across time with CI ribbons
+
+pred_cvp_plot$cvp_lab <- factor(round(pred_cvp_plot$meanCVp, 2))
+
+ggplot(pred_cvp_plot, aes(x = max_year, y = pred, color = cvp_lab, fill = cvp_lab)) +
+  geom_ribbon(aes(ymin = ci.lb, ymax = ci.ub), alpha = 0.15) +
+  geom_line(linewidth = 1) +  
+  scale_colour_manual(values=c("darkred","darkblue")) +  
+  labs(x = "Time", y = "Predicted effect size", color = "CVP", fill = "CVP") +
+  theme_minimal()    
+  
+ 
+  ggplot() +
+  geom_point(data = meta_FINAL_1y, aes(x = max_year, y = Z,  size = 1/sqrt(var_z), col=meanCVp), alpha = 0.8)  +
+scale_color_viridis()
+
+## final plot with raw data in the supplement (FIG.S12)
+  
+sup_fig12 <- ggplot() + 
+  geom_line(data=pred_cvp_plot, aes(x = max_year, y = pred,   col = cvp_lab),linewidth = 1) +  
+    geom_ribbon(data=pred_cvp_plot, aes(x = max_year,
+    ymin = ci.lb,
+    ymax = ci.ub,
+    group = cvp_lab),alpha=0.1) +
+  scale_color_manual(values=c("orange","darkred")) +  
+  labs(x = "Final year of the study", y = "Effect size (Fisher's Z)", color = "Mean CVp") +
+   new_scale_colour() +
+geom_point(data = meta_FINAL_1y, aes(x = max_year, y = Z, col =meanCVp),  size = 2)  +
+scale_colour_viridis() + 
+theme_minimal()    + theme(aspect.ratio = (1))   
+
+sup_fig12 
+
+   ggsave(
+  filename = "sup_fig12.pdf",
+  plot     = sup_fig12,
+  width    = 8,
+  height   = 8,
+  units    = "in"
+)
+    ggsave(
+  filename = "sup_fig12.png",
+  plot     = sup_fig12,
+  width    = 8,
+  height   = 8,
+  units    = "in"
+)
+  
+```
+
+
+
+
+```{r plot with predicted data}
+  
+###### plot with interaction shown as three linear predictions
+###### interaction terms as slopes
+######
+ 
+## choose values density for predictions
+ 
+  newdat_lines2 <- expand.grid(
+  max_year  = as.numeric(c(1980,2020)),
+   meanCVp  = cvp_vals,
+  KEEP.OUT.ATTRS = FALSE
+)           
+                 
+ ## create prediction matrix 
+  
+X2 <- model.matrix(~ meanCVp * max_year, data = newdat_lines2)
+colnames(X2)[colnames(X2) == "(Intercept)"] <- "intrcpt"              
+                 
+coef_names2 <- names(coef(modelCV))            # e.g. "intrcpt","cvp","time","cvp:time"
+beta_names2 <- setdiff(coef_names2, "intrcpt")
+X2 <- X2[, beta_names2, drop = FALSE]                
+               
+ pr2 <- predict(modelCV, newmods = X2)           
+               
+## prepare a data frame
+pred_time_plot <- cbind(newdat_lines2,
+                 pred  = as.numeric(pr2$pred),
+                 ci.lb = as.numeric(pr2$ci.lb),
+                 ci.ub = as.numeric(pr2$ci.ub))
+
+## 6) Plot two lines (one per CVp) across time with CI ribbons
+
+pred_time_plot$year_lab <- factor(round(pred_time_plot$max_year, 2))
+
+
+ggplot(pred_time_plot, aes(x = meanCVp, y = pred, color = year_lab, fill = year_lab)) +
+  geom_ribbon(aes(ymin = ci.lb, ymax = ci.ub), alpha = 0.15) +
+  geom_line(linewidth = 1) +  
+  scale_colour_manual(values=c("darkorange","darkblue")) +  
+  labs(x = "CVp", y = "Effect size (Z)", color = "year", fill = "year") +
+  theme_minimal()    
+
+ 
+ SUP_CV <-  ggplot() + 
+  geom_line(data=pred_time_plot, aes(x = meanCVp, y = pred, color = year_lab, fill = year_lab), linewidth = 1) +  
+    geom_ribbon(data=pred_time_plot, aes(x = meanCVp,
+    ymin = ci.lb,
+    ymax = ci.ub,
+    group = year_lab),alpha=0.1) +
+  scale_color_manual(values=c("lightblue","darkorange")) +  
+  labs(x = "Final year", y = "Effect size (Z)", color = "Final year") +
+   new_scale_colour() +
+  geom_point(data = meta_FINAL_1y, aes(x = meanCVp, y = Z,  size = 1/sqrt(var_z), col=max_year), alpha = 0.8)  +
+scale_color_viridis_c() +
+theme_minimal()  +    theme(aspect.ratio = (1))   
+
+  SUP_CV 
+  
+
+  
+  
+```
+
+
+
+```{r trends in time for hyptohesis 4 and within clades correlations}
+
+# sample size and max year
+
+ggplot() + geom_point(data = meta_FINAL_1y,aes(x = max_year,y = sample_size))
+
+cor.test(meta_FINAL_1y$max_year,meta_FINAL_1y$sample_size)
+
+ggplot() + geom_point(data = meta_FINAL_1y,aes(x = max_year, y = median_year))
+
+### check the model with different plant types 
+
+model_year_plant <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   max_year * plant_type,
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y )
+  
+summary(model_year_plant)
+summary(modelCV)
+###  subset data to similar species Gymnosperms
+
+modelCV_gymnosperms <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   meanCVp  * max_year,
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y %>% filter(plant_type == "Gymnosperm"))
+          
+summary(modelCV_gymnosperms)
+
+### subset data to similar species Angiosperms
+
+modelCV_angiosperms <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   meanCVp  * max_year,
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y %>% filter(plant_type == "Angiosperm"))
+          
+summary(modelCV_angiosperms)
+
+#### Fagales
+ 
+modelCV_fagales <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   meanCVp  * max_year,
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id), 
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data =  meta_FINAL_1y %>% filter(genus == "Fagus" | genus == "Castanea" | genus == "Quercus") )
+      
+summary(modelCV_fagales)
+
+##
+
+modelCV_fagus <-  rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   max_year,
+                       random = list(
+                                    ~1|title,
+                                      ~1|ES_id), 
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data =  meta_FINAL_1y %>% filter(genus == "Fagus" ) )
+      
+summary(modelCV_fagus)
+
+####
+
+ ggplot(data = meta_FINAL_1y %>% filter(plant_type == "Gymnosperm"), aes(meanCVp)) +
+geom_histogram(col="black",fill = "darkgrey"  , bins = 25) + xlab("meanCVp")  
+ 
+ggplot(data = meta_FINAL_1y %>% filter(plant_type == "Angiosperm"), aes(meanCVp)) +
+geom_histogram(col="black",fill = "orange"  , bins = 25) + xlab("meanCVp")  
+
+ggplot(data = meta_FINAL_1y, aes(meanCVp)) +
+geom_histogram(col="black",fill = "orange"  , bins = 25) + xlab("meanCVp")  
+
+
+####
+
+## sensitivity analysis
+## run rma.models on multiple data frames that reduce number of species or genus to see whether species turnover across time influences model results
+## for each model report Estimate, Z-value and p-value
+## draw histogram, distribution of the effects using all models
+
+# Remove rows where species is missing
+ 
+df_model <- meta_FINAL_1y %>%
+  filter(
+    !is.na(tip_label),
+    !is.na(Z),
+    !is.na(var_z),
+    !is.na(meanCVp),
+    !is.na(max_year),
+    !is.na(tip_label),
+    !is.na(title),
+    !is.na(ES_id)
+  ) %>%
+  as.data.frame()
+
+species_list <- unique(df_model$tip_label)
+
+# Lists for models and extracted results
+model_list  <- list()
+result_list <- list()
+
+for (i in seq_along(species_list)) {
+
+  excluded_sp <- species_list[i]
+
+  # Dataset containing all species except one
+  df_subset <- df_model[
+    df_model$tip_label != excluded_sp,
+    ,
+    drop = FALSE
+  ]
+
+  message(
+    "Excluding: ", excluded_sp,
+    "; rows remaining: ", nrow(df_subset),
+    "; species remaining: ",
+    length(unique(df_subset$tip_label))
+  )
+  # Run the same model on the reduced data frame
+  model_i <- tryCatch(
+    {
+      metafor::rma.mv(
+        yi = Z,
+        V = var_z,
+        mods = ~ meanCVp * max_year,
+        random = list(
+          ~ 1 | tip_label,
+          ~ 1 | title,
+          ~ 1 | ES_id
+        ),
+        R = list(
+          tip_label = phylo_corMatrix
+        ),
+        method = "REML",
+        control = list(
+          optimizer = "optim",
+          optmethod = "Nelder-Mead"
+        ),
+        data = df_subset
+      )
+    },
+    error = function(e) {
+      message(
+        "Model failed after excluding ",
+        excluded_sp,
+        ": ",
+        conditionMessage(e)
+      )
+      NULL
+    }
+  )
+  
+ # Continue to next species if the model failed
+  
+  if (is.null(model_i)) {
+    next
+  }
+# Save the complete model object
+  model_list[[as.character(excluded_sp)]] <- model_i
+
+  # Save model coefficients
+  result_list[[as.character(excluded_sp)]] <- data.frame(
+    excluded_species = as.character(excluded_sp),
+    term = rownames(model_i$b),
+    estimate = as.numeric(model_i$b),
+    se = as.numeric(model_i$se),
+    z_value = as.numeric(model_i$zval),
+    p_value = as.numeric(model_i$pval),
+    ci_lower = as.numeric(model_i$ci.lb),
+    ci_upper = as.numeric(model_i$ci.ub),
+    k = model_i$k,
+    n_species_remaining = dplyr::n_distinct(df_subset$species),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Combine all results into one data frame
+
+model_results <- bind_rows(result_list)
+model_results_int  <- model_results %>% filter(term == "meanCVp:max_year")
+
+## plot the data based on estimate, Z and p
+
+modelCVp_hist1 <-  ggplot(data = model_results_int, aes(estimate)) +
+geom_histogram(col="black",fill = "green4"  , bins = 25) + xlab("estimate") + labs(title="A") +theme(aspect.ratio = (1))
+ 
+modelCVp_hist2 <- ggplot(data = model_results_int, aes(z_value)) +
+geom_histogram(col="black",fill = "blue"  , bins = 25) + xlab("z-value") + labs(title="B") +   theme(aspect.ratio = (1))
+
+modelCVp_hist3 <- ggplot(data = model_results_int, aes(p_value)) +
+geom_histogram(col="black",fill = "red"  , bins = 25) + xlab("p-value") + labs(title="C")  + theme(aspect.ratio = (1))
+
+ ggplot(data = model_results_int, aes(p_value)) +
+geom_histogram(col="black",fill = "red"  , bins = 25) + xlab("p-value") + labs(title="c") + xlim(0,0.005)
+
+modelCV_hist <- modelCVp_hist1 + modelCVp_hist2 + modelCVp_hist3
+
+modelCV_hist
+
+############# THE SAME OPERATION FOR DIFFERENT GENERA 
+ 
+# List of species that will be excluded one at a time
+ 
+genus_list <- unique(genus_list$genus)
+
+# Lists for models and extracted results
+model_list_gen <- list()
+result_list_gen <- list()
+
+for (i in seq_along(genus_list)) {
+
+  excluded_gen <- genus_list[i]
+
+  # New data frame containing all species except excluded_sp
+  df_subset <- df_model[
+    df_model$genus != excluded_gen,
+  ]
+
+  # Remove incomplete observations required by the model
+ 
+  message(
+    "Excluding: ", excluded_gen,
+    "; rows remaining: ", nrow(df_subset),
+    "; genus remaining: ",
+    length(unique(df_subset$genus))
+  )
+
+  # Run the same model on the reduced data frame
+  model_i <- tryCatch(
+    {
+      rma.mv(
+         yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~   meanCVp  * max_year,
+                       random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+        data = df_subset
+      )
+    },
+    error = function(e) {
+      message(
+        "Model failed after excluding ",
+        excluded_gen,
+        ": ",
+        e$message
+      )
+      return(NULL)
+    }
+  )
+
+  # Continue to next species if the model failed
+  if (is.null(model_i)) {
+    next
+  }
+
+  # Save the complete model object
+  model_list_gen[[as.character(excluded_gen)]] <- model_i
+
+  # Save model coefficients
+  result_list_gen[[as.character(excluded_gen)]] <- data.frame(
+    excluded_genus = as.character(excluded_gen),
+    term = rownames(model_i$b),
+    estimate = as.numeric(model_i$b),
+    se = as.numeric(model_i$se),
+    z_value = as.numeric(model_i$zval),
+    p_value = as.numeric(model_i$pval),
+    ci_lower = as.numeric(model_i$ci.lb),
+    ci_upper = as.numeric(model_i$ci.ub),
+    k = model_i$k,
+    tau2 = model_i$tau2,
+    n_genera_remaining = length(unique(df_subset$genus)),
+    stringsAsFactors = FALSE
+  )
+}
+ 
+# Combine all results into one data frame
+model_results_gen <- bind_rows(result_list_gen)
+model_results_gen_int  <- model_results_gen %>% filter(term == "meanCVp:max_year")
+
+## plot the data based on estimate, Z and p
+ modelCVp_hist4 <-  ggplot(data = model_results_gen_int, aes(estimate)) +
+geom_histogram(col="black",fill = "green4"  , bins = 25) + xlab("estimate") + labs(title="D") + theme(aspect.ratio = (1))
+ 
+ modelCVp_hist5 <-  ggplot(data = model_results_gen_int, aes(z_value)) +
+geom_histogram(col="black",fill = "blue"  , bins = 25) + xlab("z-value") + labs(title="E")  + theme(aspect.ratio = (1))
+
+ modelCVp_hist6 <- ggplot(data = model_results_gen_int, aes(p_value)) +
+geom_histogram(col="black",fill = "red"  , bins = 25) + xlab("p-value") + labs(title="F") + theme(aspect.ratio = (1))
+
+ 
+ modelCV_hist_all <-   modelCV_hist + modelCVp_hist4 + modelCVp_hist5 + modelCVp_hist6
+
+ ### save the FIG.S9
+ 
+ modelCV_hist_all
+ 
+ggsave(
+  filename = "modelCV_hist_all.pdf",
+  plot     = modelCV_hist_all,
+#  device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 14,
+  height   = 12,
+  units    = "in"
+)
+
+```
+ 
+
+```{r publication bias using entire data set}
+
+### used in publication (FIG.S4)
+
+model_PB <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ sqrt(var_z),
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL)
+
+summary(model_PB)
+ 
+## non-significant 
+
+funnel(model_PB)
+
+funnel(model_PB, 
+      yaxis="seinv", # Inverse of standard error (precision) as the y axis
+      level = c(90, 95),  # levels of statistical significance highlighted 
+      shade = c("white", "gray55"), # shades for different levels of statistical significance
+      legend = TRUE, # display legend
+      ylab="Precision (1/SE)", 
+      cex.lab=1.4, 
+      digits=1)
+
+# Heteroscedasticity check
+
+qplot(y = sqrt(residuals(M4.1)^2), x = fitted(model_PB)) + # plot sqrt(residuals^2) against fitted values
+      geom_point() +
+      geom_smooth(method = "lm") + # method ="lm" to generate a straight line 
+      geom_hline(yintercept = 0, colour="red") 
+ 
+
+pred_Egger_reg4.1  <- orchaRd::mod_results(model_PB, mod = "var_z", group = "title",
+                    weights = "prop")
+                      
+                    
+orchaRd::bubble_plot(pred_Egger_reg4.1, group = "title",  mod = "var_z" , xlab = "Standard error", legend.pos = "top.left")  +
+geom_point(data = meta_INC, aes(x = (var_z), y = Z, color = plant_type, size = 1/sqrt(var_z)), alpha = 0.6) + scale_color_discrete()
+
+### plot_continuous(meta_FINAL, modelCV, sqrt(meta_FINAL$var_Z), "Standard error")
+#####
+
+model_time <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~ max_year,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL)
+
+summary(model_time)
+
+bubble_year2 <- orchaRd::mod_results(model_time, mod = "max_year", group = "title",
+                    weights = "prop")
+                    
+orchaRd::bubble_plot(bubble_year2, group = "title",  mod = "max_year", xlab = "Year", legend.pos = "top.left") + 
+geom_point(data = meta_FINAL, aes(x = max_year, y = Z, color = plant_type, size = 1/sqrt(var_z)), alpha = 0.6) + scale_color_discrete()
+  
+```
+
+
+
+
+```{r PCAs of traits and climate}
+
+#### running PCA with climatic variables
+library(factoextra)
+
+worldclim. <- na.omit(worldclim) 
+worldclimPCA <- worldclim.[, !(names(worldclim.) %in% c("latitude", "longitude"))]
+worldclimPCA <- prcomp(worldclimPCA, scale. = TRUE)
+
+summary(worldclimPCA)
+worldclimPCA$rotation
+
+screeplot(worldclimPCA, type = "lines", main = "Scree Plot")
+biplot(worldclimPCA, scale = 0)
+
+#
+fviz_pca_biplot(worldclimPCA)
+
+pca_scores <- as.data.frame(worldclimPCA$x)
+pca_scores$latitude <- worldclim.$latitude
+pca_scores$longitude <- worldclim.$longitude
+
+##
+
+ggplot(pca_scores, aes(x = PC1, y = PC2, color = latitude)) +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "PCA: PC1 vs PC2 colored by Latitude")
+ 
+
+meta_FINAL_1y <- left_join(meta_FINAL_1y,pca_scores, by =c("longitude", "latitude"))
+ 
+
+ 
+
+
+## running PCA with trait variables
+
+SpeciesTraits <- meta_FINAL_1y %>%
+dplyr::select(tip_label,plant_type,seed_mass, wood_density_imp, SLA, plant_height) %>% 
+  rename("Seed mass" = seed_mass, "Plant height" = plant_height,"Wood density" = wood_density_imp) %>%
+na.omit()  
+
+SpeciesTraits <- SpeciesTraits[!duplicated(SpeciesTraits), ]
+
+TraitsPCA <- prcomp(SpeciesTraits[,-1:-2], scale. = TRUE)
+
+summary(TraitsPCA)
+TraitsPCA$rotation
+
+screeplot(TraitsPCA, type = "lines", main = "Scree Plot")
+biplot(TraitsPCA, scale = 0)
+
+ ### plot PCA with trait values
+
+plot_traits_PCA <- fviz_pca_biplot(TraitsPCA, label = "var", col.var = "darkgreen" , habillage=SpeciesTraits$plant_type, geom = "point", pointsize = 3.5, alpha = 0.8,col.circle = "red",
+               #addEllipses=TRUE, ellipse.level=0.95,
+               arrowsize = 1, repel = TRUE, title = "A", mean.point = FALSE, 
+               ggtheme = theme_minimal()) + scale_colour_manual(values=c("darkorange","black")) + 
+               xlim(-4, 4) + ylim (-3, 3) + 
+               theme(axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), title = element_text(size=15)) + theme(aspect.ratio = (1)) +  my_theme + theme(legend.position = "bottom")  
+
+plot_traits_PCA
+
+########## ################################# #####################
+################################# #####################
+## plot histograms with trait values
+    
+hist(SpeciesTraits_hist_log$seed_mass, breaks = 20, col = "darkgreen", xlab = "Seed mass", main = "") 
+
+hist(SpeciesTraits_hist_log$wood_density_imp, breaks = 20, col = "darkgreen" , xlab = "Wood density", main = "") 
+
+ hist(SpeciesTraits_hist_log$plant_height, breaks = 20, col = "darkgreen" ,xlab = "Plant height", main = "") 
+
+hist(SpeciesTraits_hist_log$SLA, breaks = 20, col = "darkgreen", xlab = "SLA", main = "") 
+
+logSLA <-  ggplot(data = SpeciesTraits_hist_log, aes(SLA)) +
+geom_histogram(col="black",fill = "green4"  , bins = 25) + xlab("SLA") + labs(title="D")
+
+logPH <- ggplot( data = SpeciesTraits_hist_log, aes(plant_height)) +
+geom_histogram(col="black",fill = "green4"  , bins = 25) +  xlab("Plant height" )+ labs(title="B")
+
+logWD <-  ggplot( data = SpeciesTraits_hist_log, aes(wood_density_imp)) +
+geom_histogram(col="black",fill = "green4"  , bins = 25) +  xlab("Wood density")+ labs(title="E")
+ 
+logSM <- ggplot( data = SpeciesTraits_hist_log, aes(seed_mass)) +
+geom_histogram(col="black",fill = "green4"  , bins = 25) +  xlab("Seed mass")+ labs(title="C")
+ 
+PCA_hist <- plot_traits_PCA + (logPH  + logSM +logSLA +logWD ) + my_theme
+
+PCA_hist
+
+## SAVE THE FIG.S10
+
+ggsave(
+  filename = "pca_hist_traits.pdf",
+  plot     = PCA_hist,
+  width    = 16,
+  height   = 10,
+  units    = "in"
+)
+
+########## ################################# #####################
+
+pca_tr_scores <- as.data.frame(TraitsPCA$x)
+
+pca_tr_scores$tip_label <- SpeciesTraits$tip_label
+
+pca_tr_scores <- pca_tr_scores %>%dplyr::select(PC1,PC2,tip_label) %>% rename(pc1 = PC1, pc2 = PC2)
+ 
+meta_FINAL_1y <- left_join(meta_FINAL_1y,pca_tr_scores, by = "tip_label") 
+
+
+########## ################################# #####################
+
+model_PCA_wc <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  PC1 + PC2,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_matrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(model_PCA_wc)    
+
+model_PCA_traits <- rma.mv(yi = Z, V = var_z,
+                        method = "REML",
+                        mods = ~  pc1 + pc2,
+                        random = list(~1|tip_label,
+                                      ~1|title,
+                                      ~1|ES_id),
+                        R =  list(tip_label = phylo_corMatrix),
+                        control=list(optimizer="optim",optmethod="Nelder-Mead"),
+                        data = meta_FINAL_1y)
+      
+summary(model_PCA_traits)    
+                      
+################### no effects of traits and climate
+
+```
+
+ 
+```{r plotting a map}
+
+# for mapping geoms 
+library(rnaturalearth)
+# for map data 
+library(ggtext)
+
+world_coordinates <- map_data("world")
+ 
+#create world map using ggplot() function
+ggplot() + geom_map( data = world_coordinates, map = world_coordinates, aes(x=long, y=lat, map_id = region), fill ="darkgreen", alpha = 0.8) +
+geom_point(data=meta_FINAL, aes(x=longitude, y=latitude), shape = "circle", col = "darkorange", size = 2) + theme_void()
+
+## remove antarctica
+world_coordinates2 <- subset(world_coordinates, world_coordinates$region != "Antarctica")   
+
+world_coordinates2 <- subset(world_coordinates, long > -170   & lat > -55 )
+ 
+# as input to plot world map
+
+ plotMapLeg <- ggplot() + geom_map( data = world_coordinates2, map = world_coordinates2, aes(x=long, y=lat, map_id = region), fill ="darkgreen", alpha = 0.8) +
+ geom_point( data=meta_FINAL, aes(x=longitude, y=latitude, group = genus, col = plant_type), shape = "circle", size = 2.5) +
+theme_void() + scale_color_manual(values=c("darkorange","black")) + theme(legend.title = element_text(size=24), legend.text = element_text(size=20)) +   labs(color = "Plant type")  
+
+ leg <- ggpubr::get_legend(plotMapLeg)
+
+ggsave(
+  filename = "leg.pdf",
+  plot     = leg,
+#  device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 14,
+  height   = 12,
+  units    = "in"
+)
+
+# coord_sf()
+
+plotMap1 <-  ggplot() + geom_map( data = world_coordinates2, map = world_coordinates2, aes(x=long, y=lat, map_id = region),
+fill ="darkgreen", alpha = 0.8) +
+ geom_point( data=meta_FINAL, aes(x=longitude, y=latitude, group = genus, col = plant_type), 
+ shape = "circle", size = 2.5 ,colour = "gray95",  stroke = 1) +
+  geom_point( data=meta_FINAL, aes(x=longitude, y=latitude, group = genus, col = plant_type), shape = "circle", size = 2) +  labs(title = "A") +
+theme_void() + scale_color_manual(values=c("darkorange","black")) + 
+theme(legend.text = element_text(size=15), plot.title  = element_text(size=25),legend.title = element_text(size = 20)) + 
+  theme(legend.position = c(.1, .15)) + labs(color = "Plant type")
+# theme(legend.position =  "none")  
+
+plotMap1
+
+plotMapLeg
+
+ ggsave(
+  filename = "plotMapSOLO.png",
+  plot     = plotMapLeg,
+#  device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 20,
+  height   = 10,
+  units    = "in"
+)
+
+```
+
+
+PLOTTING FIG.1
+
+```{r plot biomes}
+
+meta_FINAL_1y$MAT = meta_nonsc_trait_1y$`Annual Mean Temperature`
+
+meta_FINAL_1y$MAP = meta_nonsc_trait_1y$`Annual Precipitation`/10
+
+
+ggplot() + geom_point(data = meta_FINAL_1y,aes(x = MAT,y = MAP))  
+
+ggplot() + geom_point(data = meta_FINAL_1y,aes(x = as.numeric(rainfall),y = MAP))  
+
+## plot all data
+whittaker_base_plot() +
+  geom_point(data = meta_FINAL_1y,
+             aes(x = MAT,
+                 y = MAP),
+                 colour = "black", alpha = 0.5,
+             shape = 16,
+             size  = 4) +
+  theme_bw()
+   
+## plot for manuscript
+ plot1c <- whittaker_base_plot() +
+   geom_point(data = meta_FINAL_1y,
+             aes(x = MAT,
+                 y = MAP),
+             shape  = 21,
+             stroke = 1, # acts as the thickness of the boundary line
+             colour = "gray95", # acts as the color of the boundary line
+             size   = 3.5) +
+               geom_point(data = meta_FINAL_1y,
+             aes(x = MAT,
+                 y = MAP,
+                 colour = plant_type), # map `status` variable to colour
+             shape = 16,
+             size  = 3,
+             alpha = 0.8) +
+             scale_colour_manual(values=c("darkorange","black")) +
+   labs(title = "C") +    ylab("MAP [cm]") +
+    xlab("MAT [°C]") + my_theme +
+  theme_bw() +  theme(axis.title = element_text(size = 20),
+                      axis.text = element_text(size = 18),
+                      plot.title  = element_text(size=24)) +  theme(aspect.ratio = (1)) +
+theme(legend.position = "none")
+  
+plot1c
+
+### plot of climate, map and pca to supplement
+# plotMap1  / (plot_traits_PCA + plotMap2 )
+
+## plot with data description
+
+  plotMap1  / (plot1b + plot1c ) +  plot_layout(guides='collect') + 
+    inset_element(leg, 0,1,0.5,1, align_to = "full", clip=TRUE) + my_theme
+ 
+ 
+plotMap <- plotMap1  / (plot1b + plot1c ) + 
+  plot_layout(widths = c(1, 2)) 
+
+### FIG.1
+
+plotMap 
+
+## 3) Save to a high-quality PDF (vector, embedded fonts)
+# Pick a sensible width/height; ~16x7 inches works well for two side-by-side panels.
+# Use device = cairo_pdf for robust font embedding across platforms.
+
+ggsave(
+  filename = "plotMap-noLeg.pdf",
+  plot     = plotMap,
+#  device   = cairo_pdf,   # needs Cairo installed; on Windows it ships with R, on macOS use XQuartz if needed
+  width    = 14,
+  height   = 12,
+  units    = "in"
+)
+
+```
+
+
+### FIGURE 2 (PHYLOGENY) can be found in additional code
+ 
+
+```{r pressure, echo=FALSE}
+
+## show information about session
+sessionInfo()
+
+## show how to cite packages
+citation(package='metafor')
+citation(package='plotbiomes')
+citation(package='ape')
+citation(package='orchaRd')
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
